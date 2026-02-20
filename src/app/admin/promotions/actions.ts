@@ -73,18 +73,51 @@ export async function getPromotions(params: {
       }
     }
 
-    const [total, promotions] = await Promise.all([
-      prisma.promotion.count({ where }),
-      prisma.promotion.findMany({
-        where,
-        include: {
-          product: true,
-        } as any,
-        orderBy: { startsAt: 'desc' },
+    const [totalResult, promotionsRaw] = await Promise.all([
+      prisma.$queryRawUnsafe<{ count: number }[]>(
+        `SELECT COUNT(*)::int as count
+         FROM "Promotion" promo
+         JOIN "Product" p ON promo."productId" = p.id
+         WHERE 1=1 ${
+           status === 'active' ? 'AND promo."isActive" = true' : 
+           status === 'inactive' ? 'AND promo."isActive" = false AND promo."expiresAt" IS NOT NULL' :
+           status === 'suggested' ? 'AND promo."isActive" = false AND promo."expiresAt" IS NULL' :
+           status === 'reported' ? 'AND promo."id" IN (SELECT DISTINCT "promotionId" FROM "Report")' : ''
+         }
+         ${query ? 'AND (p."name" ILIKE $1 OR promo."description" ILIKE $1)' : ''}
+         ${categoryId ? 'AND p."categoryId" = $2' : ''}`,
+        query ? `%${query}%` : undefined,
+        categoryId || undefined
+      ),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT promo.*, 
+                p.name as "product_name", p.id as "product_id"
+         FROM "Promotion" promo
+         JOIN "Product" p ON promo."productId" = p.id
+         WHERE 1=1 ${
+           status === 'active' ? 'AND promo."isActive" = true' : 
+           status === 'inactive' ? 'AND promo."isActive" = false AND promo."expiresAt" IS NOT NULL' :
+           status === 'suggested' ? 'AND promo."isActive" = false AND promo."expiresAt" IS NULL' :
+           status === 'reported' ? 'AND promo."id" IN (SELECT DISTINCT "promotionId" FROM "Report")' : ''
+         }
+         ${query ? 'AND (p."name" ILIKE $3 OR promo."description" ILIKE $3)' : ''}
+         ${categoryId ? 'AND p."categoryId" = $4' : ''}
+         ORDER BY promo."startsAt" DESC
+         LIMIT $1 OFFSET $2`,
+        pageSize,
         skip,
-        take: pageSize,
-      }),
+        query ? `%${query}%` : undefined,
+        categoryId || undefined
+      ).then(res => res.filter(Boolean))
     ]);
+
+    const total = totalResult[0]?.count || 0;
+
+    // Format raw results to match Prisma structure
+    const promotions = promotionsRaw.map(r => ({
+      ...r,
+      product: { id: r.product_id, name: r.product_name }
+    }));
 
     // Fetch user details manually because the 'user' relation is broken in the client
     const userIds = [...new Set(promotions.map((p: any) => p.userId).filter(Boolean))];
